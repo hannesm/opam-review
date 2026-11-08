@@ -1,0 +1,4 @@
+(executable
+  (name opam_review)
+  (public_name opam-review)
+  (libraries logs bos logs.fmt fmt.tty cmdliner fmt.cli logs.cli opam-format opam-state ohex))

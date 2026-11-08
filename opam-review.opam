@@ -1,0 +1,19 @@
+opam-version: "2.0"
+maintainer: "Hannes Mehnert <hannes@mehnert.org>"
+authors: "Hannes Mehnert <hannes@mehnert.org>"
+depends: [
+  "ocaml" {>= "5"}
+  "dune" {>= "1.0"}
+  "logs" {>= "0.10.0"}
+  "bos" {>= "0.3.0"}
+  "fmt" {>= "0.11.0"}
+  "cmdliner" {>= "2.1.1"}
+  "opam-format" {>= "2.6.1"}
+  "opam-state" {>= "2.6.1"}
+  "ohex" {>= "0.2.0"}
+
+]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+]
+synopsis: "Lint a opam file to be merged into the opam repository"
