@@ -370,7 +370,7 @@ let jump () opam_repo commit head =
         Logs.info (fun m -> m "added %s (version %s, versions %a)" filename version Fmt.(list ~sep:(any ", ") string) versions);
         parse_and_check_opam opam_repo filename package version versions content;
         check_versions filename version versions;
-        if versions = [] then check_name filenam package
+        if versions = [] then check_name filename package
       | Modified { filename ; new_content ; package ; version ; versions ; _ (* old_content *) } ->
         Logs.info (fun m -> m "modified %s" filename);
         parse_and_check_opam opam_repo filename package version versions new_content;
