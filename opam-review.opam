@@ -17,3 +17,4 @@ build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]
 synopsis: "Lint a opam file to be merged into the opam repository"
+license: "AGPL-3.0-or-later"
