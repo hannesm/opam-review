@@ -24,6 +24,7 @@
    - 9. packages should only depend on packages they need for build or runtime (unclear)
    - 10. binary packages should be avoided (unclear how to test)
    - (done) 11. changes to a package's source archive are prohibited
+     - also compare that build/install/remove didn't change
    - (done) 12. extra-files are prohibited
    - (done) 13. weak hash algorithms are prohibited
 
@@ -36,16 +37,17 @@
    - if license/url is changed (taking an earlier version of package), warn
    - if the package is new, and a package with the same name exists in the archive repository, warn!
    - (done) pre-release should have the avoid-version flag; while normal releases shouldn't
-   - check repo file #26065 / https://opam.ocaml.org/doc/Manual.html#repo
+   - (done) check repo file #26065 / https://opam.ocaml.org/doc/Manual.html#repo
    - warn if ocaml lower bound is less than supported ocaml version (indicate that versions aren't checked by CI)
-   - insane dependencies (2 = 1, 1 & false, etc.)
    - ensure other packages are installable after this change [esp. for renamed and removed]
    - (done) ensure a license which complies with SPDX
    - (done) ensure appropriate line endings (#30223)
    - avoid duplicate fields (such as "available")
-   - check deps for "v" version prefix (see jan midgaards PRs recently)
-   - check for duplicate depends (i.e. "dune" {...} "dune" {...})
-   - check for duplicate bounds in depends (i.e. "dune" {>= .. & >= ..})
+   - dependencies:
+     - insane dependencies (2 = 1, 1 & false, etc.)
+     - check deps for "v" version prefix (see jan midgaards PRs recently - such a version must exist (i.e. bin_prot >= "0.17.0" does not exist)
+     - check for duplicate depends (i.e. "dune" {...} "dune" {...})
+     - check for duplicate bounds in depends (i.e. "dune" {>= .. & >= ..})
 
    done:
    - ensure there's no pin-depends
@@ -60,6 +62,7 @@ type t =
   | Modified of { filename : string ; old_content : string ; new_content : string ; package : string ; version : string ; versions : string list }
   | Deleted of { filename : string ; package : string ; version : string ; old_content : string }
   | Renamed of { old_filename : string ; new_filename : string ; content : string ; new_package : string ; new_version : string ; versions : string list }
+  | Repo of { content : string }
 
 let get_file commit name =
   let version = commit ^ ":" ^ name in
@@ -342,7 +345,9 @@ let find_changed_opams commit head =
         else if String.starts_with ~prefix:"packages" pkg_name then begin
           Logs.err (fun m -> m "changed file %s is not an opam file, so it shouldn't be in the packages directory" pkg_name);
           acc
-        end else begin
+        end else if String.equal pkg_name "repo" then
+          `Repo :: acc
+        else begin
           Logs.warn (fun m -> m "ignoring changed file %s (not an opam file)" pkg_name);
           acc
         end)
@@ -366,7 +371,11 @@ let find_changed_opams commit head =
       | `Renamed ((old_filename, _old_package, _old_version), (new_filename, new_package, new_version)) ->
         let* content = get_file head new_filename in
         let versions = versions commit new_package in
-        Ok (Renamed { old_filename ; new_filename ; content ; new_package ; new_version ; versions } :: acc))
+        Ok (Renamed { old_filename ; new_filename ; content ; new_package ; new_version ; versions } :: acc)
+      | `Repo ->
+        let* content = get_file head "repo" in
+        Ok (Repo { content } :: acc)
+    )
     (Ok []) pkgs
 
 let check_versions version existing_ones =
@@ -439,8 +448,14 @@ let changes_are_fine dirname file old_content new_content =
       else
           [ `Error, Fmt.str "extra-sources have been altered" ]
     in
-    (* TODO compare that build/install/remove didn't change *)
     acc @ acc'
+
+let check_repo dirname content =
+  let base = OpamFilename.Base.of_string "repo" in
+  let filename = OpamFile.make (OpamFilename.create dirname base) in
+  match OpamFile.Repo.read_from_string ~filename content with
+  | exception e -> [ `Error, Fmt.str "Failed to parse: %s" (Printexc.to_string e) ]
+  | _ -> []
 
 let jump () opam_repo commit head =
   let* () = Bos.OS.Dir.set_current (Fpath.v opam_repo) in
@@ -463,7 +478,10 @@ let jump () opam_repo commit head =
           let acc = parse_and_check_opam opam_repo new_filename new_package new_version versions content in
           let acc = check_versions new_version versions @ acc in
           let acc = if versions = [] then check_name new_package @ acc else acc in
-          (new_filename, acc))
+          (new_filename, acc)
+        | Repo { content } ->
+          let acc = check_repo opam_repo content in
+          ("repo", acc))
       opams
   in
   List.iter (fun (filename, warnings) ->
