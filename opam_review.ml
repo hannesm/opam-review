@@ -11,7 +11,7 @@
 
 (* checks that could be useful (from policy)
    - 0. meet the criteria for inclusion
-   - 1. removal of packages should be avoided
+   - (done) 1. removal of packages should be avoided
    - 2. packages should be installable (here, dependencies should be present)
    - 3. provide some sort of utility for users (unclear)
    - 4. namesquatting (unclear)
@@ -34,16 +34,16 @@
    - report if x-maintenance-intent changed (or got removed) from an earlier version
    - (done) run opam lint (OpamFileTools.lint_file) - with check_upstream = true
    - download archive(s) and check checksum -- use the "mirrors" as well
-   - if license/url is changed (taking an earlier version of package), warn
+   - for a new package: if license or url is changed (taking an earlier version of package), warn
    - if the package is new, and a package with the same name exists in the archive repository, warn!
    - (done) pre-release should have the avoid-version flag; while normal releases shouldn't
    - (done) check repo file #26065 / https://opam.ocaml.org/doc/Manual.html#repo
-   - warn if ocaml lower bound is less than supported ocaml version (indicate that versions aren't checked by CI)
    - ensure other packages are installable after this change [esp. for renamed and removed]
    - (done) ensure a license which complies with SPDX
    - (done) ensure appropriate line endings (#30223)
    - avoid duplicate fields (such as "available")
    - dependencies:
+     - warn if ocaml lower bound is less than supported ocaml version (indicate that versions aren't checked by CI)
      - insane dependencies (2 = 1, 1 & false, etc.)
      - check deps for "v" version prefix (see jan midgaards PRs recently - such a version must exist (i.e. bin_prot >= "0.17.0" does not exist)
      - check for duplicate depends (i.e. "dune" {...} "dune" {...})
@@ -448,7 +448,19 @@ let changes_are_fine dirname file old_content new_content =
       else
           [ `Error, Fmt.str "extra-sources have been altered" ]
     in
-    acc @ acc'
+    let acc'' = match OpamFile.OPAM.dev_repo old_opam, OpamFile.OPAM.dev_repo new_opam with
+      | Some old_url, Some new_url when not (OpamUrl.equal old_url new_url) ->
+        [ `Warning, Fmt.str "dev-repo changed from %s to %s" (OpamUrl.to_string old_url) (OpamUrl.to_string new_url) ]
+      | _ -> []
+    in
+    let acc''' = match OpamFile.OPAM.homepage old_opam, OpamFile.OPAM.homepage new_opam with
+      | old_urls, new_urls when not (List.equal String.equal old_urls new_urls) ->
+        [ `Warning, Fmt.str "homepage changed from %a to %a"
+            Fmt.(list ~sep:(any ", ") string) old_urls
+            Fmt.(list ~sep:(any ", ") string) new_urls ]
+      | _ -> []
+    in
+    acc @ acc' @ acc'' @ acc'''
 
 let check_repo dirname content =
   let base = OpamFilename.Base.of_string "repo" in
