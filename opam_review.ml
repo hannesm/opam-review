@@ -42,6 +42,7 @@
    - (done) ensure a license which complies with SPDX
    - (done) ensure appropriate line endings (#30223)
    - avoid duplicate fields (such as "available")
+   - some compiler packages should have avoid-version: investigate and implement (see #30940)
    - dependencies:
      - warn if ocaml lower bound is less than supported ocaml version (indicate that versions aren't checked by CI)
      - insane dependencies (2 = 1, 1 & false, etc.)
