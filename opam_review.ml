@@ -422,7 +422,7 @@ let jump () opam_repo commit head =
         let warnings = List.sort (fun (lvl, msg) (lvl', msg') ->
             match lvl, lvl' with
             | `Warning, `Warning | `Error, `Error -> String.compare msg msg'
-            | `Error, `Warning -> 1 | `Warning, `Error -> -1)
+            | `Error, `Warning -> -1 | `Warning, `Error -> 1)
             warnings
         in
         Fmt.pr "%s:@." filename;
