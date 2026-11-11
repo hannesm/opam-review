@@ -108,30 +108,37 @@ let hex_size = function
   | `SHA256 -> 64
   | `SHA512 -> 128
 
-let check_hash_checksum package url =
+let check_hash_checksum url =
   let check_one_hash url hash =
     let content = OpamHash.contents hash in
-    (try ignore (Ohex.decode content) with
-     | Invalid_argument a ->
-       Logs.err (fun m -> m "package %s url %s invalid hex (%s) for checksum %s" package url a content));
+    let acc =
+      try ignore (Ohex.decode content); [] with
+      | Invalid_argument a ->
+        [ `Error, Fmt.str "Invalid hex (error: %s) for checksum %s" a content ]
+    in
     let kind = OpamHash.kind hash in
-    (if String.length content <> hex_size kind then
-       Logs.err (fun m -> m "package %s url %s has an invalid hex size %u, expected %u"
-                    package url (String.length content) (hex_size kind)));
-    kind = `MD5
+    let acc =
+      if String.length content <> hex_size kind then
+        (`Error, Fmt.str "Invalid hex length for %s, expected %u got %u" url (hex_size kind) (String.length content)) :: acc
+      else
+        acc
+    in
+    kind = `MD5, acc
   in
   let url_str = OpamUrl.to_string (OpamFile.URL.url url) in
   match OpamFile.URL.checksum url with
-  | [] -> Logs.err (fun m -> m "package %s missing checksum for %s" package url_str)
+  | [] -> [ `Error, Fmt.str "missing checksum for %s" url_str ]
   | xs ->
-    let weak =
-      List.fold_left (fun weak hash ->
-          let weak' = check_one_hash url_str hash in
-          weak && weak')
-        false xs
+    let weak, acc =
+      List.fold_left (fun (weak, acc) hash ->
+          let weak', w = check_one_hash url_str hash in
+          weak && weak', w @ acc)
+        (false, []) xs
     in
     if weak then
-      Logs.err (fun m -> m "weak hash (md5) for %s" url_str)
+      (`Error, Fmt.str "Only a weak hash was provided for %s" url_str) :: acc
+    else
+      acc
 
 let decode_intent s =
   let is_numeric s =
@@ -188,90 +195,109 @@ let may_avoid_version package version versions =
     false
 
 let check_opam_data filename pkg version versions opam =
-  if OpamFile.OPAM.pin_depends opam <> [] then
-    Logs.err (fun m -> m "opam file %s contains 'pin-depends'" filename);
-  (match OpamFile.OPAM.name_opt opam with
-   | None -> ()
-   | Some name ->
-     let pkg = List.nth (String.split_on_char '/' filename) 1 in
-     let name' = OpamPackage.Name.to_string name in
-     if String.equal pkg name' then
-       Logs.debug (fun m -> m "opam file %s contains a 'name' field %s" filename name')
-     else
-       Logs.err (fun m -> m "opam file %s contains a 'name' field %s, and this does not match the path %s" filename name' pkg));
-  (match OpamFile.OPAM.version_opt opam with
-   | None -> ()
-   | Some ver ->
-     let ver' = OpamPackage.Version.to_string ver in
-     let ver_pkg =
-       String.concat "." (List.tl (String.split_on_char '.' (List.nth (String.split_on_char '/' filename) 2))) in
-     if String.equal ver_pkg ver' then
-       Logs.debug (fun m -> m "opam file %s contains a 'version' field %s" filename ver')
-     else
-       Logs.err (fun m -> m "opam file %s contains a 'version' field %s, and this does not match the path %s" filename ver' ver_pkg));
-  (match OpamFile.OPAM.extra_files opam with
-   | None -> ()
-   | Some _ -> Logs.err (fun m -> m "opam file %s contains extra_files" filename));
-  (match OpamFile.OPAM.url opam with
-   | None -> ()
-   | Some u -> check_hash_checksum filename u);
-  (let extras = OpamFile.OPAM.extra_sources opam in
-   List.iter (fun (_, url) -> check_hash_checksum filename url) extras);
-  (match OpamFile.OPAM.extended opam "x-maintenance-intent" Fun.id with
-   | None -> ()
-   | Some { pelem = List { pelem = xs ; _ } ; _ } ->
-     let extract_string = function
-       | { OpamParserTypes.FullPos.pelem = OpamParserTypes.FullPos.String s ; _ } ->
-         if not (decode_intent s) then
-           Logs.err (fun m -> m "opam file %s couldn't decode x-maintenance-intent %S"
-                        filename s)
-       | x ->
-         Logs.warn (fun m -> m "opam file %s x-maintenance-intent failure: expected a string, got %s"
-                       filename (OpamPrinter.FullPos.value x))
-     in
-     List.iter extract_string xs
-   | Some x ->
-     Logs.warn (fun m -> m "opam file %s x-maintenance-intent failure: expected a list of strings, got %s"
-                   filename (OpamPrinter.FullPos.value x));
-     ());
-  (match OpamFile.OPAM.license opam with
-   | [] -> Logs.err (fun m -> m "opam file %s missing license" filename)
-   | ls ->
-     List.iter (fun l ->
-         match Spdx_licenses.parse l with
-         | Ok _ -> ()
-         | Error `InvalidLicenseID id ->
-           Logs.err (fun m -> m "opam file %s invalid license ID %S" filename id)
-         | Error `InvalidExceptionID id ->
-           Logs.err (fun m -> m "opam file %s invalid exception ID %S" filename id)
-         | Error `ParseError ->
-           Logs.err (fun m -> m "opam file %s license parse error %S" filename l))
-       ls);
-  (if List.mem OpamTypes.Pkgflag_AvoidVersion (OpamFile.OPAM.flags opam) then
-     if may_avoid_version pkg version versions then () else
-     match String.index_opt version '~' with
-     | None -> Logs.warn (fun m -> m "opam file %s with avoid version, but version does not include ~"
-                             filename)
-     | _ -> ())
-
+  let acc =
+    if OpamFile.OPAM.pin_depends opam <> [] then
+      [ `Error, "Contains pin-depends" ]
+    else
+      []
+  in
+  let acc =
+    match OpamFile.OPAM.name_opt opam with
+    | None -> acc
+    | Some name ->
+      let pkg = List.nth (String.split_on_char '/' filename) 1 in
+      let name' = OpamPackage.Name.to_string name in
+      if String.equal pkg name' then
+        acc
+      else
+        (`Error, Fmt.str "'name: %s' doesn't match path %s" name' pkg) :: acc
+  in
+  let acc =
+    match OpamFile.OPAM.version_opt opam with
+    | None -> acc
+    | Some ver ->
+      let ver' = OpamPackage.Version.to_string ver in
+      let ver_pkg =
+        String.concat "." (List.tl (String.split_on_char '.' (List.nth (String.split_on_char '/' filename) 2))) in
+      if String.equal ver_pkg ver' then
+        acc
+      else
+        (`Error, Fmt.str "'version: %s' doesn't match path %s" ver' ver_pkg) :: acc
+  in
+  let acc =
+    match OpamFile.OPAM.extra_files opam with
+    | None -> acc
+    | Some _ -> (`Error, "Contains extra-files") :: acc
+  in
+  let acc =
+    match OpamFile.OPAM.url opam with
+    | None -> acc
+    | Some u -> check_hash_checksum u @ acc
+  in
+  let acc =
+    let extras = OpamFile.OPAM.extra_sources opam in
+    List.fold_left (fun acc (_, url) -> check_hash_checksum url @ acc) acc extras
+  in
+  let acc =
+    match OpamFile.OPAM.extended opam "x-maintenance-intent" Fun.id with
+    | None -> (`Warning, "Missing x-maintenance-intent field") :: acc
+    | Some { pelem = List { pelem = xs ; _ } ; _ } ->
+      let extract_string = function
+        | { OpamParserTypes.FullPos.pelem = OpamParserTypes.FullPos.String s ; _ } ->
+          if decode_intent s then
+            None
+          else
+            Some (`Error, Fmt.str "Decoding x-maintenance-intent %s failed" s)
+        | x ->
+          Some (`Error, Fmt.str "Expected a string, found %s while decoding x-maintenance-intent" (OpamPrinter.FullPos.value x))
+      in
+      (List.filter_map extract_string xs) @ acc
+    | Some x ->
+      (`Error, Fmt.str "expected a list of strings, got %s" (OpamPrinter.FullPos.value x)) :: acc
+  in
+  let acc =
+    match OpamFile.OPAM.license opam with
+    | [] -> (`Error, "Missing license") :: acc
+    | ls ->
+      List.filter_map (fun l ->
+          match Spdx_licenses.parse l with
+          | Ok _ -> None
+          | Error `InvalidLicenseID id ->
+            Some (`Error, Fmt.str "Invalid license ID %S" id)
+          | Error `InvalidExceptionID id ->
+            Some (`Error, Fmt.str "Invalid exception ID %S" id)
+          | Error `ParseError ->
+            Some (`Error, Fmt.str "License parse error %S" l))
+        ls @ acc
+  in
+  if List.mem OpamTypes.Pkgflag_AvoidVersion (OpamFile.OPAM.flags opam) then
+    if may_avoid_version pkg version versions then
+      acc
+    else
+      match String.index_opt version '~' with
+      | None -> (`Warning, "Contains 'avoid-version', but version does not include '~'") :: acc
+      | _ -> acc
+  else
+    acc
 
 let parse_and_check_opam dirname file pkg version versions data =
-  (match String.index_opt data '\r' with
-   | None -> ()
-   | Some _ -> Logs.err (fun m -> m "opam file %s contains carriage return" file));
+  let acc =
+    match String.find_first ~sub:"\r\n" data with
+    | None -> []
+    | Some pos -> [ `Error, Fmt.str "Contains a carriage return newline at offset %u" pos ]
+  in
   let base = OpamFilename.Base.of_string file in
   let filename = OpamFile.make (OpamFilename.create dirname base) in
   match OpamFile.OPAM.read_from_string ~filename data with
-  | exception e ->
-    Logs.err (fun m -> m "error while parsing opam file %s: %s" file
-                 (Printexc.to_string e))
+  | exception e -> [ `Error, Fmt.str "Parse error: %s" (Printexc.to_string e) ]
   | opam ->
-    List.iter (function
-        | (25|35|36|37|46|47|62|68), _, _ -> () (* ignore missing authors, homepage, bug-reports, dev-repo, 'conf flagged', synopsis (start, end), SPDX-license, license *)
-        | id, `Error, err -> Logs.err (fun m -> m "opam file %s lint error %u: %s" file id err)
-        | id, `Warning, err -> Logs.warn (fun m -> m "opam file %s lint warning %u: %s" file id err))
-      (OpamFileTools.lint opam);
-    check_opam_data file pkg version versions opam
+    let acc' = check_opam_data file pkg version versions opam in
+    acc @ acc' @
+    List.filter_map (function
+        | (25|35|36|37|46|47|62|68), _, _ -> None (* ignore missing authors, homepage, bug-reports, dev-repo, 'conf flagged', synopsis (start, end), SPDX-license, license *)
+        | id, `Error, err -> Some (`Error, Fmt.str "opam lint error: %u %s" id err)
+        | id, `Warning, err -> Some (`Warning, Fmt.str "opam lint warning: %u %s" id err))
+      (OpamFileTools.lint opam)
 
 let find_changed_opams commit head =
   let cmd = Bos.Cmd.(v "git" % "diff" % "--name-status" % commit % head) in
@@ -314,7 +340,7 @@ let find_changed_opams commit head =
           Logs.err (fun m -> m "changed file %s is not an opam file, so it shouldn't be in the packages directory" pkg_name);
           acc
         end else begin
-          Logs.app (fun m -> m "ignoring changed file %s (not an opam file)" pkg_name);
+          Logs.warn (fun m -> m "ignoring changed file %s (not an opam file)" pkg_name);
           acc
         end)
       [] pkgs
@@ -340,48 +366,75 @@ let find_changed_opams commit head =
         Ok (Renamed { old_filename ; new_filename ; content ; new_package ; new_version ; versions } :: acc))
     (Ok []) pkgs
 
-let check_versions filename version existing_ones =
+let check_versions version existing_ones =
   if List.exists (fun v -> String.get v 0 = 'v') existing_ones then
     if not (String.get version 0 = 'v') then
-      Logs.err (fun m -> m "opam file %s does not have a 'v' prefix in the version %s, other releases have"
-                   filename version)
+      [ `Error, Fmt.str "Version does not have a 'v' prefix %s, while other releases have" version ]
     else
-      ()
+      []
   else
     if String.get version 0 = 'v' then
-      Logs.err (fun m -> m "opam file %s does have a 'v' prefix in the version %s, other releases have no such prefix"
-                   filename version)
+      [ `Error, Fmt.str "Version does have a 'v' prefix %s, while other releases have no such prefix" version ]
+    else
+      []
 
-let check_name filename pkg =
-  List.iter (fun prefix ->
-      if String.starts_with ~prefix pkg then
-        Logs.warn (fun m -> m "NEW opam file %s should avoid %s prefix" filename prefix))
-    [  "ocaml" ; "msys2" ; "arch" ; "host-arch" ; "host-system" ; "system" ];
+let check_name pkg =
+  let acc =
+    List.filter_map (fun prefix ->
+        if String.starts_with ~prefix pkg then
+          Some (`Warning, Fmt.str "Should avoid %s prefix" prefix)
+        else
+          None)
+      [ "ocaml" ; "msys2" ; "arch" ; "host-arch" ; "host-system" ; "system" ]
+  in
   if String.ends_with ~suffix:"ocaml" pkg then
-    Logs.warn (fun m -> m "NEW opam file %s should avoid ocaml suffix" filename)
-
+    (`Warning, "Should avoid ocaml suffix") :: acc
+  else
+    acc
 
 let jump () opam_repo commit head =
   let* () = Bos.OS.Dir.set_current (Fpath.v opam_repo) in
   let* opams = find_changed_opams commit head in
   let opam_repo = OpamFilename.Dir.of_string opam_repo in
-  List.iter (function
-      | Added { filename ; package ; content ; version ; versions ; _ } ->
-        Logs.info (fun m -> m "added %s (version %s, versions %a)" filename version Fmt.(list ~sep:(any ", ") string) versions);
-        parse_and_check_opam opam_repo filename package version versions content;
-        check_versions filename version versions;
-        if versions = [] then check_name filename package
-      | Modified { filename ; new_content ; package ; version ; versions ; _ (* old_content *) } ->
-        Logs.info (fun m -> m "modified %s" filename);
-        parse_and_check_opam opam_repo filename package version versions new_content;
-      | Deleted { filename ; _ } (* old_content *) ->
-        Logs.info (fun m -> m "deleted %s" filename);
-      | Renamed { new_filename ; content ; old_filename ; new_package ; new_version ; versions } ->
-        Logs.info (fun m -> m "renamed %s -> %s" old_filename new_filename);
-        parse_and_check_opam opam_repo new_filename new_package new_version versions content;
-        check_versions new_filename new_version versions;
-        if versions = [] then check_name new_filename new_package)
-    opams;
+  let warnings =
+    List.map (function
+        | Added { filename ; package ; content ; version ; versions ; _ } ->
+          let acc = parse_and_check_opam opam_repo filename package version versions content in
+          let acc = check_versions version versions @ acc in
+          let acc = if versions = [] then check_name package @ acc else acc in
+          (filename, acc)
+        | Modified { filename ; new_content ; package ; version ; versions ; _ (* old_content *) } ->
+          let acc = parse_and_check_opam opam_repo filename package version versions new_content in
+          (filename, acc)
+        | Deleted { filename ; _ } (* old_content *) ->
+          (filename, [ `Warning, "Deleted" ])
+        | Renamed { new_filename ; content ; new_package ; new_version ; versions ; _ } ->
+          let acc = parse_and_check_opam opam_repo new_filename new_package new_version versions content in
+          let acc = check_versions new_version versions @ acc in
+          let acc = if versions = [] then check_name new_package @ acc else acc in
+          (new_filename, acc))
+      opams
+  in
+  List.iter (fun (filename, warnings) ->
+      if warnings = [] then
+        Fmt.pr "✅ %s@.@." filename
+      else
+        let warnings = List.sort (fun (lvl, msg) (lvl', msg') ->
+            match lvl, lvl' with
+            | `Warning, `Warning | `Error, `Error -> String.compare msg msg'
+            | `Error, `Warning -> 1 | `Warning, `Error -> -1)
+            warnings
+        in
+        Fmt.pr "%s:@." filename;
+        List.iter (fun (lvl, msg) ->
+            let symbol = match lvl with
+              | `Warning -> "⚠️"
+              | `Error -> "❌"
+            in
+            Fmt.pr "- %s %s@." symbol msg)
+          warnings;
+        Fmt.pr "@.")
+      warnings;
 (*  let all_opams =
     lazy
       (OpamPackage.keys
