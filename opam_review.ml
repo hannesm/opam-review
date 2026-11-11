@@ -23,13 +23,14 @@
    - 8. development packages (pointing to a git branch) are to be avoided
    - 9. packages should only depend on packages they need for build or runtime (unclear)
    - 10. binary packages should be avoided (unclear how to test)
-   - 11. changes to a package's source archive are prohibited
+   - (done) 11. changes to a package's source archive are prohibited
    - (done) 12. extra-files are prohibited
    - (done) 13. weak hash algorithms are prohibited
 
    bug reports / feature wishes:
-   - (done) ensure hex-encoded checksums are actually hex - and the right length
-   - (done) x-maintenance-intent field is defined (if not warning) and well-formed (if not, error) -- also report if it changed (or got removed) from an earlier version
+   - (done) ensure hex-encoded checksums are actually hex - and the right length (#30118)
+   - (done) x-maintenance-intent field is defined (if not warning) and well-formed (if not, error)
+   - report if x-maintenance-intent changed (or got removed) from an earlier version
    - (done) run opam lint (OpamFileTools.lint_file) - with check_upstream = true
    - download archive(s) and check checksum -- use the "mirrors" as well
    - if license/url is changed (taking an earlier version of package), warn
@@ -43,6 +44,8 @@
    - (done) ensure appropriate line endings (#30223)
    - avoid duplicate fields (such as "available")
    - check deps for "v" version prefix (see jan midgaards PRs recently)
+   - check for duplicate depends (i.e. "dune" {...} "dune" {...})
+   - check for duplicate bounds in depends (i.e. "dune" {>= .. & >= ..})
 
    done:
    - ensure there's no pin-depends
@@ -392,6 +395,53 @@ let check_name pkg =
   else
     acc
 
+let changes_are_fine dirname file old_content new_content =
+  let check_url old_url new_url =
+    let new_checksums_are_superset =
+      List.for_all (fun hash ->
+          List.exists (fun h -> OpamHash.equal hash h) (OpamFile.URL.checksum new_url))
+        (OpamFile.URL.checksum old_url)
+    in
+    if new_checksums_are_superset then
+      []
+    else
+      [ `Error, Fmt.str "Not all checksums of %s are contained in the modified file" (OpamUrl.to_string (OpamFile.URL.url new_url)) ]
+  in
+  let base = OpamFilename.Base.of_string file in
+  let filename = OpamFile.make (OpamFilename.create dirname base) in
+  match OpamFile.OPAM.read_from_string ~filename old_content,
+        OpamFile.OPAM.read_from_string ~filename new_content with
+  | exception _ -> []
+  | old_opam, new_opam ->
+    let acc =
+      match OpamFile.OPAM.url old_opam, OpamFile.OPAM.url new_opam with
+      | Some old_url, Some new_url -> check_url old_url new_url
+      | _ -> []
+    in
+    let old_extra, new_extra = OpamFile.OPAM.extra_sources old_opam, OpamFile.OPAM.extra_sources new_opam in
+    let acc' =
+      if List.length old_extra = List.length new_extra then
+        List.fold_left (fun acc (name, url) ->
+            let exists, acc =
+              List.fold_left (fun (exists, acc) (name', url') ->
+                  if OpamFilename.Base.equal name name' then
+                    (true, (check_url url url') @ acc)
+                  else
+                    (exists, acc))
+                (false, acc) new_extra
+            in
+            if exists then
+              acc
+            else
+              (`Error, Fmt.str "extra-sources %s does not exist anymore"
+                 (OpamFilename.Base.to_string name)) :: acc)
+          [] old_extra
+      else
+          [ `Error, Fmt.str "extra-sources have been altered" ]
+    in
+    (* TODO compare that build/install/remove didn't change *)
+    acc @ acc'
+
 let jump () opam_repo commit head =
   let* () = Bos.OS.Dir.set_current (Fpath.v opam_repo) in
   let* opams = find_changed_opams commit head in
@@ -403,8 +453,9 @@ let jump () opam_repo commit head =
           let acc = check_versions version versions @ acc in
           let acc = if versions = [] then check_name package @ acc else acc in
           (filename, acc)
-        | Modified { filename ; new_content ; package ; version ; versions ; _ (* old_content *) } ->
+        | Modified { filename ; new_content ; package ; version ; versions ; old_content } ->
           let acc = parse_and_check_opam opam_repo filename package version versions new_content in
+          let acc = changes_are_fine opam_repo filename old_content new_content @ acc in
           (filename, acc)
         | Deleted { filename ; _ } (* old_content *) ->
           (filename, [ `Warning, "Deleted" ])
