@@ -516,7 +516,8 @@ let jump () opam_repo commit head =
             Fmt.pr "- %s %s@." symbol msg)
           warnings;
         Fmt.pr "@.")
-      warnings;
+    warnings;
+  Fmt.pr "Review done by [opam-review](https://github.com/hannesm/opam-review) - please report any suggestions and issues.@.";
 (*  let all_opams =
     lazy
       (OpamPackage.keys
