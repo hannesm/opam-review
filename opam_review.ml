@@ -247,7 +247,7 @@ let check_opam_data filename pkg version versions opam =
   in
   let acc =
     match OpamFile.OPAM.extended opam "x-maintenance-intent" Fun.id with
-    | None -> (`Warning, "Missing x-maintenance-intent field") :: acc
+    | None -> (`Warning, "Missing `x-maintenance-intent` field. Please take a look at the [archiving policy](https://github.com/ocaml/opam-repository/blob/master/governance/policies/archiving.md).") :: acc
     | Some { pelem = List { pelem = xs ; _ } ; _ } ->
       let extract_string = function
         | { OpamParserTypes.FullPos.pelem = OpamParserTypes.FullPos.String s ; _ } ->
